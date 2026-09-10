@@ -1,0 +1,7 @@
+.git
+*.tar.gz
+*.tgz
+*.log
+.DS_Store
+*.tmp
+*.bak.*

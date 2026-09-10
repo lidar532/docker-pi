@@ -1,0 +1,8 @@
+.git
+pi-ercam.tar.gz
+*.tar.gz
+*.tgz
+*.log
+.DS_Store
+*.tmp
+*.bak.*

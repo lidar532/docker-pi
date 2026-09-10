@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# pi.in.docker
+# Run the latest pi.dev CLI inside a Docker container.
+# The host root filesystem is bind-mounted at /host and the current
+# working directory is preserved, so pi feels like a native tool.
+# Your ~/.pi/agent config directory is mounted into the container so
+# settings, credentials, and sessions persist on the host.
+
+IMAGE="${PI_DOCKER_IMAGE:-pi-ercam:latest}"
+HOST_MOUNT="${PI_HOST_MOUNT:-/host}"
+PI_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    cat <<EOF >&2
+Docker image '$IMAGE' not found.
+
+Build or load it first:
+  docker build -t $IMAGE -f Dockerfile .
+  # or on a remote host:
+  docker load < pi-ercam.tar.gz
+EOF
+    exit 1
+fi
+
+mkdir -p "$PI_AGENT_DIR"
+
+HOST_CWD="$(pwd)"
+CONTAINER_CWD="${HOST_MOUNT}${HOST_CWD}"
+
+# Ensure the container cwd actually exists inside the mount.
+# If the current dir is outside the bind mount (e.g. a tmpfs), fall back to /host.
+if [[ ! "$HOST_CWD" =~ ^/ ]]; then
+    CONTAINER_CWD="$HOST_MOUNT"
+fi
+
+# Detect whether we are running from a real terminal so we can
+# allocate a TTY only when appropriate. Interactive TUI mode needs -t;
+# print/pipe mode does not.
+if [ -t 0 ] && [ -t 1 ]; then
+    DOCKER_TTY_FLAGS=(-it)
+else
+    DOCKER_TTY_FLAGS=(-i)
+fi
+
+exec docker run --rm \
+    "${DOCKER_TTY_FLAGS[@]}" \
+    --user "$(id -u):$(id -g)" \
+    --group-add "$(id -g)" \
+    --workdir "$CONTAINER_CWD" \
+    -v "/:${HOST_MOUNT}" \
+    -v "${PI_AGENT_DIR}:/home/wright/.pi/agent" \
+    -e TERM \
+    -e HOME=/home/wright \
+    -e PI_CODING_AGENT_DIR=/home/wright/.pi/agent \
+    "$IMAGE" \
+    "$@"
