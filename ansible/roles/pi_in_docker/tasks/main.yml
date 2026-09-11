@@ -1,0 +1,95 @@
+---
+- name: Map ansible architecture to image tag suffix
+  ansible.builtin.set_fact:
+    pi_arch: "{% if ansible_architecture == 'x86_64' %}amd64{% elif ansible_architecture in ['aarch64','arm64'] %}arm64{% else %}{{ ansible_architecture }}{% endif %}"
+
+- name: Determine preferred container runtime
+  ansible.builtin.command: "which docker"
+  register: docker_path
+  failed_when: false
+  changed_when: false
+
+- name: Check Docker daemon is reachable
+  ansible.builtin.command: "docker info"
+  register: docker_info
+  failed_when: false
+  changed_when: false
+  when: docker_path.rc == 0
+
+- name: Set runtime to docker when available
+  ansible.builtin.set_fact:
+    pi_runtime: docker
+  when: docker_path.rc == 0 and docker_info.rc == 0
+
+- name: Check for podman when docker is not available
+  ansible.builtin.command: "which podman"
+  register: podman_path
+  failed_when: false
+  changed_when: false
+  when: pi_runtime is not defined
+
+- name: Set runtime to podman when available
+  ansible.builtin.set_fact:
+    pi_runtime: podman
+  when: pi_runtime is not defined and podman_path.rc == 0
+
+- name: Install podman if no runtime found
+  ansible.builtin.package:
+    name: podman
+    state: present
+  become: true
+  when: pi_runtime is not defined and pi_install_podman
+
+- name: Re-detect podman after install
+  ansible.builtin.command: "which podman"
+  register: podman_path
+  failed_when: false
+  changed_when: false
+  when: pi_runtime is not defined and pi_install_podman
+
+- name: Set runtime to podman after install
+  ansible.builtin.set_fact:
+    pi_runtime: podman
+  when: pi_runtime is not defined and podman_path.rc == 0
+
+- name: Fail if no runtime is available
+  ansible.builtin.fail:
+    msg: "No container runtime found and pi_install_podman is false."
+  when: pi_runtime is not defined
+
+- name: Add user to docker group
+  ansible.builtin.user:
+    name: "{{ ansible_user_id }}"
+    groups: docker
+    append: true
+  become: true
+  when: pi_runtime == 'docker'
+
+- name: Ensure install directory exists
+  ansible.builtin.file:
+    path: "{{ pi_install_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Copy pi-in-docker wrapper
+  ansible.builtin.copy:
+    src: "{{ pi_wrapper_src }}"
+    dest: "{{ pi_install_dir }}/pi-in-docker"
+    mode: '0755'
+
+- name: Copy image tarball
+  ansible.builtin.copy:
+    src: "{{ pi_tarball_dir }}/pi-in-docker-{{ pi_version }}-{{ pi_arch }}.tar.gz"
+    dest: "{{ ansible_env.HOME }}/.cache/pi-in-docker-ship/pi-in-docker-{{ pi_version }}-{{ pi_arch }}.tar.gz"
+    mode: '0644'
+  register: tarball_copy
+
+- name: Load image into docker
+  ansible.builtin.shell: |
+    docker load < {{ ansible_env.HOME }}/.cache/pi-in-docker-ship/pi-in-docker-{{ pi_version }}-{{ pi_arch }}.tar.gz
+  when: pi_runtime == 'docker'
+
+- name: Load image into podman
+  ansible.builtin.shell: |
+    podman load < {{ ansible_env.HOME }}/.cache/pi-in-docker-ship/pi-in-docker-{{ pi_version }}-{{ pi_arch }}.tar.gz
+  when: pi_runtime == 'podman'

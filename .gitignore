@@ -6,3 +6,4 @@ pi-ercam.tar.gz
 .DS_Store
 *.tmp
 *.bak.*
+dist/

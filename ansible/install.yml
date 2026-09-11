@@ -1,0 +1,6 @@
+---
+- name: Install pi-in-docker on target hosts
+  hosts: all
+  gather_facts: true
+  roles:
+    - role: pi_in_docker

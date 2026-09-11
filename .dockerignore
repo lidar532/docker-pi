@@ -1,7 +1,13 @@
 .git
+.gitignore
 *.tar.gz
 *.tgz
 *.log
 .DS_Store
 *.tmp
 *.bak.*
+dist/
+README.md
+Makefile
+ship-pi-in-docker.sh
+ansible/

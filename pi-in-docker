@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+#
+# pi-in-docker: run the pi coding agent inside a container.
+#
+# This wrapper is runtime-agnostic: it prefers Docker if available, otherwise
+# Podman, and it selects the correct architecture-specific image tag.
+#
+# Usage:
+#   pi-in-docker [pi-args...]
+#   pi-in-docker --version
+#   pi-in-docker -p "hello world"
+#
+# Environment overrides:
+#   PI_IMAGE      - full image reference to use (e.g. docker.io/lidar532/pi-in-docker:latest-amd64)
+#   PI_RUNTIME    - docker or podman (auto-detected if unset)
+#   PI_NETWORK    - container network mode, default "bridge"; use "host" to reach LAN hostnames like spark:12001
+#   PI_BIN        - directory where the wrapper is expected to be installed, default "auto"
+#
+# Host requirements:
+#   - Docker or Podman installed and the current user can run containers.
+#   - ~/.pi/agent exists and holds pi config/auth.json.
+#   - For network=bridge, LAN hostnames may not resolve; use PI_NETWORK=host or pass --add-host.
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Configuration defaults
+# ---------------------------------------------------------------------------
+
+DEFAULT_REGISTRY="docker.io/lidar532"
+DEFAULT_NAME="pi-in-docker"
+DEFAULT_VERSION="latest"
+
+PI_NETWORK="${PI_NETWORK:-bridge}"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+detect_runtime() {
+    if command -v docker >/dev/null 2>&1; then
+        # Verify the daemon is reachable.
+        if docker info >/dev/null 2>&1; then
+            echo "docker"
+            return
+        fi
+    fi
+    if command -v podman >/dev/null 2>&1; then
+        echo "podman"
+        return
+    fi
+    echo ""
+}
+
+require_runtime() {
+    local rt
+    rt="${PI_RUNTIME:-$(detect_runtime)}"
+    if [[ -z "$rt" ]]; then
+        cat <<'EOF' >&2
+Error: no container runtime found.
+
+Install Docker or Podman, or re-run with a runtime in PATH.
+To install Podman on Debian/Ubuntu/Raspberry Pi OS:
+
+    sudo apt-get update
+    sudo apt-get install -y podman
+
+EOF
+        exit 1
+    fi
+    echo "$rt"
+}
+
+detect_arch() {
+    local machine
+    machine="$(uname -m)"
+    case "$machine" in
+        x86_64) echo "amd64" ;;
+        aarch64|arm64) echo "arm64" ;;
+        *) echo "$machine" ;;
+    esac
+}
+
+resolve_image() {
+    if [[ -n "${PI_IMAGE:-}" ]]; then
+        echo "$PI_IMAGE"
+        return
+    fi
+    local arch
+    arch="${PI_ARCH:-$(detect_arch)}"
+    echo "${DEFAULT_REGISTRY}/${DEFAULT_NAME}:${DEFAULT_VERSION}-${arch}"
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+RUNTIME="$(require_runtime)"
+IMAGE="$(resolve_image)"
+
+USER_ID="$(id -u)"
+GROUP_ID="$(id -g)"
+USER_NAME="$(id -un)"
+HOME_DIR="$HOME"
+PI_AGENT_DIR="${HOME_DIR}/.pi/agent"
+CWD="$(pwd)"
+
+# Base docker/podman args.
+# Use -t only when stdin is a TTY so non-interactive use (e.g. piped input,
+# CI, or --version) still works.
+DOCKER_ARGS=(
+    --rm
+    -i
+    --network "$PI_NETWORK"
+    --user "${USER_ID}:${GROUP_ID}"
+    --workdir "/host${CWD}"
+    -v "/:/host:rw"
+    -e "HOME=${HOME_DIR}"
+    -e "USER=${USER_NAME}"
+    -v "${HOME_DIR}:${HOME_DIR}:rw"
+)
+
+if [[ -t 0 ]]; then
+    DOCKER_ARGS+=( -t )
+fi
+
+# Mount the pi config directory into the container at the same path so
+# pi's config/auth.json resolution works regardless of container username.
+if [[ -d "$PI_AGENT_DIR" ]]; then
+    DOCKER_ARGS+=( -v "${PI_AGENT_DIR}:${PI_AGENT_DIR}:rw" )
+fi
+
+# Forward SSH agent if available (useful for git push/pull inside pi).
+if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
+    DOCKER_ARGS+=(
+        -e "SSH_AUTH_SOCK=${SSH_AUTH_SOCK}"
+        -v "${SSH_AUTH_SOCK}:${SSH_AUTH_SOCK}"
+    )
+fi
+
+# Forward common provider API key environment variables.
+for var in ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY AZURE_OPENAI_API_KEY GROQ_API_KEY MISTRAL_API_KEY COHERE_API_KEY DEEPSEEK_API_KEY; do
+    if [[ -n "${!var:-}" ]]; then
+        DOCKER_ARGS+=( -e "${var}=${!var}" )
+    fi
+done
+
+# Allow the user to pass extra container options before the pi args using a
+# sentinel: anything after "--" is forwarded to pi, anything before is forwarded
+# to the container runtime. For simplicity, we just pass all args to pi.
+exec "$RUNTIME" run "${DOCKER_ARGS[@]}" "$IMAGE" "$@"

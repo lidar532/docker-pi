@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+#
+# ship-pi-in-docker.sh: build, export, and stage (or install) the pi-in-docker
+# image and wrapper on a remote Linux host.
+#
+# Usage:
+#   ./ship-pi-in-docker.sh [options] user@hostname
+#
+# Options:
+#   -a, --arch amd64|arm64|auto      Target architecture (default: auto-detect)
+#   -r, --runtime docker|podman|auto  Container runtime preference (default: auto)
+#   -d, --install-dir DIR            Directory for wrapper on target (default: ~/bin)
+#   -s, --system-bin                 Install wrapper to /usr/local/bin instead
+#   --no-install                     Stage tarball and wrapper; do not install
+#   --install-podman                 Install podman on target if no runtime found
+#   -h, --help                       Show this help
+#
+# Examples:
+#   ./ship-pi-in-docker.sh wright@ercam
+#   ./ship-pi-in-docker.sh -a arm64 --install-dir /home/pi/.local/bin pi@raspberrypi
+#   ./ship-pi-in-docker.sh -a amd64 --system-bin --install-podman admin@newserver
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_REGISTRY="docker.io/lidar532"
+DEFAULT_NAME="pi-in-docker"
+DEFAULT_VERSION="latest"
+
+# ---------------------------------------------------------------------------
+# Defaults
+# ---------------------------------------------------------------------------
+
+ARCH="auto"
+RUNTIME="auto"
+INSTALL_DIR="\$HOME/bin"
+SYSTEM_BIN=false
+NO_INSTALL=false
+INSTALL_PODMAN=false
+TARGET=""
+
+# ---------------------------------------------------------------------------
+# Parse arguments
+# ---------------------------------------------------------------------------
+
+usage() {
+    sed -n '2,28p' "$0"
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -a|--arch)
+            ARCH="$2"; shift 2 ;;
+        -r|--runtime)
+            RUNTIME="$2"; shift 2 ;;
+        -d|--install-dir)
+            INSTALL_DIR="$2"; shift 2 ;;
+        -s|--system-bin)
+            SYSTEM_BIN=true; shift ;;
+        --no-install)
+            NO_INSTALL=true; shift ;;
+        --install-podman)
+            INSTALL_PODMAN=true; shift ;;
+        -h|--help)
+            usage; exit 0 ;;
+        --)
+            shift; break ;;
+        -*)
+            echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
+        *)
+            if [[ -z "$TARGET" ]]; then
+                TARGET="$1"; shift
+            else
+                echo "Unexpected argument: $1" >&2; exit 1
+            fi
+            ;;
+    esac
+done
+
+if [[ -z "$TARGET" ]]; then
+    echo "Error: target host required (e.g. wright@ercam)" >&2
+    usage >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
+
+detect_target_arch() {
+    local arch
+    arch="$(ssh "$TARGET" 'uname -m')"
+    case "$arch" in
+        x86_64) echo "amd64" ;;
+        aarch64|arm64) echo "arm64" ;;
+        *) echo "$arch" ;;
+    esac
+}
+
+build_if_missing() {
+    local tag="$1"
+    if ! docker image inspect "$tag" >/dev/null 2>&1; then
+        echo "Image $tag not found locally; building..."
+        case "$ARCH" in
+            amd64) make -C "$SCRIPT_DIR" build-amd64 ;;
+            arm64) make -C "$SCRIPT_DIR" build-arm64 ;;
+            *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
+        esac
+    fi
+}
+
+export_tarball() {
+    local tag="$1"
+    local out="$2"
+    echo "Exporting $tag to $out..."
+    mkdir -p "$(dirname "$out")"
+    docker save "$tag" | gzip > "$out"
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+if [[ "$ARCH" == "auto" ]]; then
+    echo "Detecting target architecture..."
+    ARCH="$(detect_target_arch)"
+    echo "Target architecture: $ARCH"
+fi
+
+TAG="${DEFAULT_REGISTRY}/${DEFAULT_NAME}:${DEFAULT_VERSION}-${ARCH}"
+TARBALL="${SCRIPT_DIR}/dist/pi-in-docker-${DEFAULT_VERSION}-${ARCH}.tar.gz"
+WRAPPER="${SCRIPT_DIR}/pi-in-docker"
+
+build_if_missing "$TAG"
+export_tarball "$TAG" "$TARBALL"
+
+STAGE_DIR="\$HOME/.cache/pi-in-docker-ship"
+
+# Build the remote install script.
+REMOTE_SCRIPT=$(cat <<EOF
+set -euo pipefail
+
+ARCH="$ARCH"
+TAG="$TAG"
+TARBALL="\$HOME/.cache/pi-in-docker-ship/pi-in-docker-${DEFAULT_VERSION}-${ARCH}.tar.gz"
+WRAPPER_SRC="\$HOME/.cache/pi-in-docker-ship/pi-in-docker"
+
+mkdir -p "\$HOME/.cache/pi-in-docker-ship"
+
+# Detect or install container runtime.
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    RUNTIME="docker"
+    GROUP="docker"
+elif command -v podman >/dev/null 2>&1; then
+    RUNTIME="podman"
+    GROUP="\$(id -gn)"
+else
+    if $INSTALL_PODMAN; then
+        echo "No container runtime found; installing Podman..."
+        if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y podman
+        elif command -v dnf >/dev/null 2&1; then
+            sudo dnf install -y podman
+        elif command -v yum >/dev/null 2>&1; then
+            sudo yum install -y podman
+        else
+            echo "Could not install podman: no supported package manager found." >&2
+            exit 1
+        fi
+        RUNTIME="podman"
+        GROUP="\$(id -gn)"
+    else
+        echo "No container runtime found. Re-run with --install-podman or install Docker/Podman manually." >&2
+        exit 1
+    fi
+fi
+
+# Add user to the appropriate group.
+if [[ "\$RUNTIME" == "docker" ]]; then
+    if ! groups "\$USER" | grep -q '\bdocker\b'; then
+        echo "Adding \$USER to docker group..."
+        sudo usermod -aG docker "\$USER"
+        echo "Please log out and back in for the group change to take effect, then re-run."
+        exit 0
+    fi
+fi
+
+# Load image.
+echo "Loading image from \$TARBALL..."
+if [[ "\$RUNTIME" == "docker" ]]; then
+    docker load < "\$TARBALL"
+else
+    podman load < "\$TARBALL"
+fi
+
+# Install wrapper.
+if $NO_INSTALL; then
+    echo "Skipping wrapper install (--no-install)."
+    echo "Tarball and wrapper staged at: \$HOME/.cache/pi-in-docker-ship"
+    exit 0
+fi
+
+if $SYSTEM_BIN; then
+    DEST="/usr/local/bin/pi-in-docker"
+    echo "Installing wrapper to \$DEST (requires sudo)..."
+    sudo cp "\$WRAPPER_SRC" "\$DEST"
+    sudo chmod 755 "\$DEST"
+else
+    DEST="$INSTALL_DIR"
+    echo "Installing wrapper to \$DEST..."
+    mkdir -p "\$DEST"
+    cp "\$WRAPPER_SRC" "\$DEST/pi-in-docker"
+    chmod 755 "\$DEST/pi-in-docker"
+    if [[ ":\$PATH:" != *":\$DEST:"* ]]; then
+        echo "Warning: \$DEST is not in your PATH. Add it to ~/.bashrc:"
+        echo "  export PATH=\"\\$PATH:\$DEST\""
+    fi
+fi
+
+echo "Done."
+EOF
+)
+
+echo "Copying tarball and wrapper to ${TARGET}..."
+ssh "$TARGET" "mkdir -p ${STAGE_DIR}"
+scp "$TARBALL" "$WRAPPER" "${TARGET}:${STAGE_DIR}/"
+
+echo "Running remote install script..."
+ssh -t "$TARGET" "$REMOTE_SCRIPT"

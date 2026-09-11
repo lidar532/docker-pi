@@ -1,0 +1,16 @@
+---
+# Defaults for pi_in_docker role
+
+# Image to load. The role expects a tarball named:
+#   pi-in-docker-{{ pi_version }}-{{ ansible_architecture_mapped }}.tar.gz
+# to exist on the Ansible controller at {{ pi_tarball_dir }}/
+pi_registry: docker.io/lidar532
+pi_name: pi-in-docker
+pi_version: latest
+pi_tarball_dir: "{{ playbook_dir }}/../dist"
+pi_wrapper_src: "{{ playbook_dir }}/../pi-in-docker"
+
+# Installation options
+pi_install_dir: "{{ ansible_env.HOME }}/bin"
+pi_install_system_bin: false
+pi_install_podman: true

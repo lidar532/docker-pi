@@ -1,32 +1,40 @@
 # docker-pi
 
-Run the latest [pi](https://pi.dev) coding agent inside a Docker container.
-The container bind-mounts the host root filesystem at `/host` so pi can work
+Run the latest [pi](https://pi.dev) coding agent inside a container. The
+container bind-mounts the host root filesystem at `/host` so pi can work
 anywhere on the machine, and mounts your `~/.pi/agent` directory so settings,
 credentials, and sessions persist on the host.
 
-This project is designed for use on `ercam` and this development machine, but
-it does not touch the host's native pi installation unless you explicitly
-install the wrapper.
+This project builds architecture-specific images for:
+
+- `linux/amd64` — desktops, servers, VMs
+- `linux/arm64/v8` — Raspberry Pi 4/5, Raspberry Pi 3B with a 64-bit OS,
+  Apple Silicon, Nvidia Spark DGX, ARM servers
+
+The wrapper script is runtime-agnostic: it uses Docker if available,
+otherwise Podman, and it auto-selects the correct architecture-specific image.
 
 ## What this gives you
 
 - **Latest pi from pi.dev** installed via `npm` inside the image.
 - **Node 24 inside the image** so Node/npm do not pollute the host.
-- **No overwrite of existing pi**: the wrapper is named `pi.in.docker` and can
-  optionally be linked to `pi` later.
-- **Portable config**: your `~/.pi/agent` settings are mounted into the container
-  at runtime, not baked into the image.
+- **No overwrite of existing pi**: the wrapper is named `pi-in-docker` and is
+  installed to `~/bin` by default.
+- **Portable config**: your `~/.pi/agent` settings are mounted into the
+  container at runtime, not baked into the image.
 - **Full host access**: the host `/` is bind-mounted as `/host`, with the
   current working directory preserved.
+- **Container runtime flexibility**: Docker or Podman.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `Dockerfile` | Builds the container image with Node 24 and the latest pi. |
-| `pi.in.docker` | Wrapper that runs pi in the container with proper mounts and UID mapping. |
-| `ship-pi-to-ercam.sh` | Builds, exports, and stages the image on `ercam`. |
+| `Dockerfile` | Builds the container image with Node 24, pi, and `jq`. |
+| `Makefile` | Builds and exports `amd64` and `arm64` images. |
+| `pi-in-docker` | Wrapper that runs pi in a container with proper mounts and UID mapping. |
+| `ship-pi-in-docker.sh` | SSH-based staging/install script for a remote host. |
+| `ansible/` | Ansible playbook and role for remote install. |
 | `README.md` | This file. |
 
 ## Quick start (local)
@@ -34,192 +42,180 @@ install the wrapper.
 ```bash
 cd /path/to/docker-pi
 
-# Build the image
-docker build -t pi-ercam:latest -f Dockerfile .
+# Build for the current machine
+make build
+
+# Or explicitly:
+make build-amd64
+make build-arm64
 
 # Run pi in the current directory
-./pi.in.docker
+./pi-in-docker
 
 # Or pass arguments
-./pi.in.docker -p "Summarize this repo"
+./pi-in-docker -p "Summarize this repo"
 ```
 
 Your local `~/.pi/agent` is mounted automatically, so settings, sessions, and
 `/login` credentials are reused.
 
-## Deploy to ercam
+## Build and export a tarball
 
 ```bash
-cd /path/to/docker-pi
-./ship-pi-to-ercam.sh
+# Current host architecture
+make export
+
+# Specific architectures
+make export-amd64
+make export-arm64
+
+# Both
+make export-all
 ```
 
-This script:
+Tarballs are written to `dist/`:
 
-1. Builds `pi-ercam:latest` locally.
-2. Exports it to `pi-ercam.tar.gz`.
-3. Copies the tarball and `pi.in.docker` to `wright@ercam:/tmp/docker-pi-ship/`.
+```text
+dist/pi-in-docker-latest-amd64.tar.gz
+dist/pi-in-docker-latest-arm64.tar.gz
+```
 
-It does **not** install anything into `/usr/local/bin`. Complete the install
-manually on ercam:
+## Deploy to a remote host
 
 ```bash
-ssh -t wright@ercam
-
-# 1. Make sure your user can run Docker without sudo.
-sudo usermod -aG docker $USER
-# Log out and back in, or run:
-newgrp docker
-
-# 2. Load the image.
-docker load < /tmp/docker-pi-ship/pi-ercam.tar.gz
-
-# 3. (optional) Install the wrapper system-wide.
-sudo mv /tmp/docker-pi-ship/pi.in.docker /usr/local/bin/pi.in.docker
-sudo chmod 755 /usr/local/bin/pi.in.docker
-
-# 4. Copy your tracked pi config (models/settings) from this machine.
-#    Run this from your local ~/.pi repo:
-#      git ls-files | tar -czf - -T - | \
-#        ssh wright@ercam "mkdir -p ~/.pi && cd ~/.pi && tar -xzf -"
-
-# 5. Copy your credentials (see "Copy credentials to ercam" below).
-
-# 6. Run pi.
-pi.in.docker
+./ship-pi-in-docker.sh wright@ercam
+./ship-pi-in-docker.sh -a arm64 pi@raspberrypi.local
+./ship-pi-in-docker.sh -a amd64 --install-podman admin@newserver
 ```
 
-## Copy settings and models to ercam
+The script will:
 
-This repo does **not** copy your `~/.pi/agent` directory; it only ships the
-runtime image. Keep config sync separate, for example by copying the tracked
-files from your local `~/.pi` git repo:
+1. Build the requested architecture image if it is not already present.
+2. Export it to a tarball.
+3. Copy the tarball and `pi-in-docker` wrapper to the target host.
+4. Detect Docker or Podman on the target; if neither is found, install Podman.
+5. Add the remote user to the `docker` group when Docker is used.
+6. Load the image into the selected runtime.
+7. Install the wrapper to `~/bin` (or `/usr/local/bin` with `--system-bin`).
+
+If you only want to stage files without installing, use `--no-install`.
+
+## Deploy with Ansible
+
+Build the images first:
+
+```bash
+make export-all
+```
+
+Copy `ansible/inventory.example.yml` to `ansible/inventory.yml`, edit it for
+your hosts, then run:
+
+```bash
+cd ansible
+ansible-playbook -i inventory.yml install.yml
+```
+
+The playbook installs the wrapper to `~/bin` and loads the correct image
+for each target's architecture.
+
+## Copy pi config and credentials to a remote host
+
+This repo ships the runtime image only. Keep config and credentials separate.
+
+### Copy tracked config
+
+From your local `~/.pi` git repo:
 
 ```bash
 cd ~/.pi
 git ls-files | tar -czf - -T - | \
-  ssh wright@ercam "mkdir -p ~/.pi && cd ~/.pi && tar -xzf -"
+  ssh wright@target "mkdir -p ~/.pi && cd ~/.pi && tar -xzf -"
 ```
 
-After that, on ercam, you can run:
+### Copy credentials
+
+Your pi credentials live in the untracked file `~/.pi/agent/auth.json`.
 
 ```bash
-pi.in.docker
+ssh -t wright@target "mkdir -p ~/.pi/agent && chmod 700 ~/.pi/agent"
+scp ~/.pi/agent/auth.json wright@target:~/.pi/agent/auth.json
+ssh -t wright@target "chmod 600 ~/.pi/agent/auth.json"
 ```
 
-## Copy credentials and API keys to ercam
+### Re-authenticate instead of copying
 
-Your pi credentials are stored in the untracked file `~/.pi/agent/auth.json`.
-The easiest way to move them to ercam is a single secure copy:
-
-```bash
-# Make sure the agent directory already exists on ercam
-ssh -t wright@ercam "mkdir -p ~/.pi/agent && chmod 700 ~/.pi/agent"
-
-# Copy the credentials file
-scp ~/.pi/agent/auth.json wright@ercam:~/.pi/agent/auth.json
-
-# Lock down permissions
-ssh -t wright@ercam "chmod 600 ~/.pi/agent/auth.json"
-```
-
-### Provider-specific notes
-
-Your local `auth.json` contains entries for these providers:
-
-- `github-copilot`
-- `Google.com (Personal)`
-- `Google.com (NOAA)`
-- `kimi.ai`
-- `Xplane-FLA.lan`
-- `ollama.com`
-- `spark`
-
-Subscription/API-key providers (`github-copilot`, Google, `kimi.ai`,
-`ollama.com`) store a real credential. Copying `auth.json` is usually enough.
-If a token is device-bound, simply re-run `/login` for that provider on ercam.
-
-Local/self-hosted providers (`Xplane-FLA.lan`, `spark`) normally use a dummy
-key and rely on the endpoint being reachable from ercam.
-
-### Optional: re-authenticate fresh on ercam
-
-If you do not want to copy the file, you can recreate credentials on the new
-machine:
+If you prefer not to move tokens across machines, log in fresh on the target:
 
 ```bash
-pi.in.docker
+pi-in-docker
 /login github-copilot
 /login google
 /login kimi.ai
 /login spark
 ```
 
-This avoids moving any tokens across machines.
-
-## First run on ercam
-
-After loading the image and copying config + credentials, test it:
+## First run on a remote host
 
 ```bash
-ssh -t wright@ercam
-pi.in.docker --version
-pi.in.docker -p "hello from ercam"
+ssh -t wright@target
+pi-in-docker --version
+pi-in-docker -p "hello from $(hostname)"
 ```
 
 If your settings use `externalEditor: "code --wait"` and a GUI editor is not
-installed on ercam, change it in `~/.pi/agent/settings.json` on ercam to an
-editor that is available, e.g. `vi`, `vim`, or `nano`. Since ercam is a
-headless server, `vi` is the most likely choice.
+installed, change it in `~/.pi/agent/settings.json` on the target to `vi`,
+`vim`, or `nano`.
 
-If your `settings.json` lists installed packages (for example
-`npm:@narumitw/pi-btw`), pi will prompt to install them on first startup, or
-you can install them manually:
+## Web search with SearXNG
+
+The image includes `jq`. If you have copied your
+[SearXNG search skill](https://github.com/lidar532/pi-config) to the target,
+`/web` queries will work inside the container as long as the container can
+reach your SearXNG instance. If LAN hostnames like `spark:12001` do not
+resolve from inside the container, run with:
 
 ```bash
-pi.in.docker
-pi install npm:@narumitw/pi-btw
+PI_NETWORK=host pi-in-docker
 ```
 
-## Updating to the latest pi from pi.dev
+or add the host manually with `--add-host` (pass it before any pi args).
 
-The pi package is installed globally inside the image at build time. To get the
-latest version, just rebuild and re-ship:
+## Updating to the latest pi
+
+Because the image installs `@earendil-works/pi-coding-agent` without pinning,
+each rebuild fetches the latest release from pi.dev:
 
 ```bash
 cd /path/to/docker-pi
-
-# Locally
-./ship-pi-to-ercam.sh
-
-# On ercam (after the ship script finishes)
-ssh -t wright@ercam "docker load < /tmp/docker-pi-ship/pi-ercam.tar.gz"
+make export-all
+./ship-pi-in-docker.sh wright@target
 ```
 
-Because the image uses `npm install -g @earendil-works/pi-coding-agent` without
-pinning a version, each rebuild fetches the latest release from pi.dev.
-
-## Customization
+## Configuration
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `PI_DOCKER_IMAGE` | `pi-ercam:latest` | Image name used by the wrapper. |
-| `PI_HOST_MOUNT` | `/host` | Where the host root is mounted in the container. |
-| `PI_CODING_AGENT_DIR` | `$HOME/.pi/agent` | Host pi config directory. |
+| `PI_IMAGE` | `docker.io/lidar532/pi-in-docker:latest-<arch>` | Full image reference. |
+| `PI_ARCH` | auto from `uname -m` | Architecture tag suffix (`amd64` or `arm64`). |
+| `PI_RUNTIME` | auto (`docker` preferred) | Container runtime to use. |
+| `PI_NETWORK` | `bridge` | Container network mode. Use `host` for LAN hostnames. |
+| `PI_BIN` | `~/bin` | Expected install directory (informational). |
 
 Example:
 
 ```bash
-PI_DOCKER_IMAGE=my-pi:latest ./pi.in.docker
+PI_NETWORK=host PI_RUNTIME=podman ./pi-in-docker
 ```
 
 ## Notes
 
-- The image creates a `wright` user with UID/GID 1000 to match `wright@ercam`.
-  At runtime the wrapper overrides this with your actual host UID/GID.
+- The image creates a fallback `piuser` with UID/GID 1000. The runtime wrapper
+  overrides this with the actual host UID/GID so file ownership matches.
 - The container is stateless except for the bind mounts. Sessions and settings
   live on the host in `~/.pi/agent`.
 - Node.js and npm live only inside the image; you do not need them on the host.
+- Raspberry Pi 3B must be running a **64-bit OS** to use the `arm64` image.
 
 ## License
 

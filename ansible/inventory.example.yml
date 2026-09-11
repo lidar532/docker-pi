@@ -1,0 +1,14 @@
+---
+all:
+  children:
+    pi_servers:
+      hosts:
+        ercam:
+          ansible_host: ercam
+          ansible_user: wright
+        raspberrypi:
+          ansible_host: raspberrypi.local
+          ansible_user: pi
+        spark_dgx:
+          ansible_host: spark
+          ansible_user: wright
