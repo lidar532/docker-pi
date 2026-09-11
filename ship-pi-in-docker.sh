@@ -218,7 +218,7 @@ WRAPPER="${SCRIPT_DIR}/pi-in-docker"
 build_if_missing "$TAG"
 export_tarball "$TAG" "$TARBALL"
 
-STAGE_DIR="\$HOME/.cache/pi-in-docker-ship"
+STAGE_DIR="~/.cache/pi-in-docker-ship"
 
 # Build the remote install script.
 REMOTE_SCRIPT=$(cat <<EOF
