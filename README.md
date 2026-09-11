@@ -135,18 +135,12 @@ Your local `auth.json` contains entries for these providers:
 - `ollama.com`
 - `spark`
 
-For **subscription/OAuth providers** (`github-copilot`, Google), tokens may be
-session- or device-bound. If pi refuses to authenticate after copying,
-simply run `/login github-copilot` or `/login google` inside pi on ercam and
-re-authorize.
+Subscription/API-key providers (`github-copilot`, Google, `kimi.ai`,
+`ollama.com`) store a real credential. Copying `auth.json` is usually enough.
+If a token is device-bound, simply re-run `/login` for that provider on ercam.
 
-For **API-key providers** (`kimi.ai`, `spark`), copying `auth.json` is usually
-enough, because the key is stored verbatim. If you prefer environment
-variables, set them in `~/.bashrc` on ercam and reference them in
-`~/.pi/agent/models.json` with `$VAR_NAME` syntax.
-
-Local/self-hosted providers (`Xplane-FLA.lan`, `ollama.com`) normally use a
-dummy key and rely on the endpoint being reachable from ercam.
+Local/self-hosted providers (`Xplane-FLA.lan`, `spark`) normally use a dummy
+key and rely on the endpoint being reachable from ercam.
 
 ### Optional: re-authenticate fresh on ercam
 
