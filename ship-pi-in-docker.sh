@@ -297,8 +297,9 @@ else
     cp "\$WRAPPER_SRC" "\$DEST/pi-in-docker"
     chmod 755 "\$DEST/pi-in-docker"
     if [[ ":\$PATH:" != *":\$DEST:"* ]]; then
-        echo "Warning: \$DEST is not in your PATH. Add it to ~/.bashrc:"
-        echo "  export PATH=\"\\$PATH:\$DEST\""
+        echo "Warning: \$DEST is not in your PATH. Adding it to ~/.bashrc..."
+        printf '\\n# pi-in-docker wrapper\\nexport PATH=\"\\$PATH:%s\"\\n' "\$DEST" >> "\$HOME/.bashrc"
+        echo "Please run 'source ~/.bashrc' or log out/back in for the change to take effect."
     fi
 fi
 
